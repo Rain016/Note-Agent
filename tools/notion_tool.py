@@ -1,8 +1,7 @@
 import os
+import re
 from notion_client import Client
 from langchain_core.tools import tool
-
-PARENT_PAGE_ID = os.getenv("NOTION_PAGE_ID")
 
 def get_notion_client():
     return Client(auth=os.getenv("NOTION_API_KEY"))
@@ -27,7 +26,6 @@ def get_or_create_paper_page(paper_title: str) -> str:
     return new_page["id"]
 
 def concept_exists(page_id: str, concept: str) -> bool:
-    """檢查頁面裡是否已有這個概念的 toggle"""
     notion = get_notion_client()
     blocks = notion.blocks.children.list(page_id).get("results", [])
     for block in blocks:
@@ -37,23 +35,43 @@ def concept_exists(page_id: str, concept: str) -> bool:
                 return True
     return False
 
+def text_to_rich_text(text: str) -> list:
+    if re.match(r'^\$\$(.+)\$\$$', text.strip()):
+        formula = re.match(r'^\$\$(.+)\$\$$', text.strip()).group(1)
+        return [{"type": "equation", "equation": {"expression": formula}}]
+    return [{"type": "text", "text": {"content": text}}]
+
+def make_paragraph_block(text: str) -> dict:
+    text = text.strip()
+    if re.match(r'^\$\$(.+)\$\$$', text):
+        formula = re.match(r'^\$\$(.+)\$\$$', text).group(1)
+        return {
+            "object": "block",
+            "type": "equation",
+            "equation": {"expression": formula}
+        }
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": text}}]
+        }
+    }
+
 def create_toggle_block(page_id: str, note: dict):
-    """在頁面裡建立 toggle 結構的筆記"""
-    
-    # 建立 key_points 的子 bullet
     notion = get_notion_client()
+
     key_point_children = [
         {
             "object": "block",
             "type": "bulleted_list_item",
             "bulleted_list_item": {
-                "rich_text": [{"type": "text", "text": {"content": point}}]
+                "rich_text": text_to_rich_text(point)
             }
         }
         for point in note["key_points"]
     ]
 
-    # 建立 related_concepts 的子 bullet
     related_children = [
         {
             "object": "block",
@@ -63,6 +81,12 @@ def create_toggle_block(page_id: str, note: dict):
             }
         }
         for concept in note["related_concepts"]
+    ]
+
+    understanding_blocks = [
+        make_paragraph_block(line)
+        for line in note["my_understanding"].split("\n")
+        if line.strip()
     ]
 
     notion.blocks.children.append(
@@ -87,15 +111,7 @@ def create_toggle_block(page_id: str, note: dict):
                             "type": "toggle",
                             "toggle": {
                                 "rich_text": [{"type": "text", "text": {"content": "我的理解"}}],
-                                "children": [
-                                    {
-                                        "object": "block",
-                                        "type": "paragraph",
-                                        "paragraph": {
-                                            "rich_text": [{"type": "text", "text": {"content": note["my_understanding"]}}]
-                                        }
-                                    }
-                                ]
+                                "children": understanding_blocks
                             }
                         },
                         {
@@ -112,6 +128,17 @@ def create_toggle_block(page_id: str, note: dict):
         ]
     )
 
+def delete_concept_from_notion(page_id: str, concept: str) -> bool:
+    notion = get_notion_client()
+    blocks = notion.blocks.children.list(page_id).get("results", [])
+    for block in blocks:
+        if block["type"] == "toggle":
+            title = block["toggle"]["rich_text"]
+            if title and title[0]["text"]["content"] == concept:
+                notion.blocks.delete(block["id"])
+                return True
+    return False
+
 @tool
 def save_to_notion_tool(paper_title: str, concept: str, key_points: list, my_understanding: str, related_concepts: list) -> str:
     """把整理好的筆記存到 Notion。"""
@@ -126,6 +153,11 @@ def save_to_notion_tool(paper_title: str, concept: str, key_points: list, my_und
 
     if concept_exists(page_id, concept):
         return f"這個概念已經存在：{paper_title} → {concept}，跳過儲存"
-    
+
     create_toggle_block(page_id, note)
     return f"筆記已存到 Notion：{paper_title} → {concept}"
+
+def delete_paper_page(page_id: str):
+    """刪除整篇論文的 Notion 頁面"""
+    notion = get_notion_client()
+    notion.pages.update(page_id, archived=True)
