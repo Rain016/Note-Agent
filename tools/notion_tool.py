@@ -36,10 +36,24 @@ def concept_exists(page_id: str, concept: str) -> bool:
     return False
 
 def text_to_rich_text(text: str) -> list:
-    if re.match(r'^\$\$(.+)\$\$$', text.strip()):
-        formula = re.match(r'^\$\$(.+)\$\$$', text.strip()).group(1)
-        return [{"type": "equation", "equation": {"expression": formula}}]
-    return [{"type": "text", "text": {"content": text}}]
+    text = text.strip()
+    # 整行都是公式
+    full_match = re.match(r'^\$\$(.+)\$\$$', text)
+    if full_match:
+        return [{"type": "equation", "equation": {"expression": full_match.group(1)}}]
+    # 文字裡面包含公式，拆開處理
+    parts = re.split(r'(\$\$.+?\$\$|\$.+?\$)', text)
+    rich_text = []
+    for part in parts:
+        if re.match(r'^\$\$(.+)\$\$$', part):
+            expr = re.match(r'^\$\$(.+)\$\$$', part).group(1)
+            rich_text.append({"type": "equation", "equation": {"expression": expr}})
+        elif re.match(r'^\$(.+)\$$', part):
+            expr = re.match(r'^\$(.+)\$$', part).group(1)
+            rich_text.append({"type": "equation", "equation": {"expression": expr}})
+        elif part:
+            rich_text.append({"type": "text", "text": {"content": part}})
+    return rich_text
 
 def make_paragraph_block(text: str) -> dict:
     text = text.strip()

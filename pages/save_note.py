@@ -1,11 +1,22 @@
 import streamlit as st
 from tools.organize import organize_note_internal
-from tools.notion_tool import get_or_create_paper_page, concept_exists, create_toggle_block
+from tools.notion_tool import get_or_create_paper_page, concept_exists, create_toggle_block, get_notion_client, delete_concept_from_notion
 from tools.pinecone_tool import get_index, get_embeddings
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 import hashlib
+import os
+
+def get_existing_papers():
+    notion = get_notion_client()
+    parent_id = os.getenv("NOTION_PAGE_ID")
+    results = notion.blocks.children.list(parent_id).get("results", [])
+    papers = []
+    for block in results:
+        if block["type"] == "child_page":
+            papers.append(block["child_page"]["title"])
+    return papers
 
 def save_to_pinecone(note: dict):
     index = get_index()
@@ -64,7 +75,20 @@ def ai_revise_note(note: dict, instruction: str) -> dict:
 
 st.title("✏️ 存筆記")
 
-paper_title = st.text_input("論文名稱", placeholder="例如：Diffusion Policy")
+with st.spinner("載入論文列表..."):
+    existing_papers = get_existing_papers()
+
+paper_option = st.radio("論文", ["選擇已有論文", "新增論文"], horizontal=True)
+
+if paper_option == "選擇已有論文":
+    if existing_papers:
+        paper_title = st.selectbox("選擇論文", existing_papers)
+    else:
+        st.info("還沒有論文，請選擇新增論文！")
+        paper_title = ""
+else:
+    paper_title = st.text_input("論文名稱", placeholder="例如：Diffusion Policy")
+
 concept_name = st.text_input("概念名稱", placeholder="例如：Forward Process")
 uploaded_files = st.file_uploader(
     "上傳對話 markdown 檔（可多選）",
@@ -91,13 +115,13 @@ if "current_note" in st.session_state:
     note = st.session_state["current_note"]
 
     st.subheader("整理結果")
-    
+
     col_edit, col_preview = st.columns(2)
-    
+
     with col_edit:
         st.markdown("#### ✏️ 編輯")
         edited_concept = st.text_input("概念名稱", value=note["concept"], key="edit_concept")
-        
+
         st.write("**核心重點**（每行一個）")
         edited_key_points = st.text_area(
             "核心重點",
@@ -105,13 +129,13 @@ if "current_note" in st.session_state:
             height=150,
             label_visibility="collapsed"
         )
-        
+
         edited_understanding = st.text_area(
             "我的理解",
             value=note["my_understanding"],
             height=100
         )
-        
+
         edited_related = st.text_input(
             "相關概念（用逗號分隔）",
             value=", ".join(note["related_concepts"])
@@ -135,19 +159,22 @@ if "current_note" in st.session_state:
     with col_preview:
         st.markdown("#### 👁️ 預覽")
         st.markdown(f"## {edited_concept}")
-        
+
         st.markdown("**核心重點**")
         for point in edited_key_points.split("\n"):
             if point.strip():
                 st.markdown(f"- {point.strip()}")
-        
+
         st.markdown("**我的理解**")
         st.markdown(edited_understanding)
-        
+
         st.markdown("**相關概念**")
         st.markdown(", ".join([r.strip() for r in edited_related.split(",") if r.strip()]))
 
     st.divider()
+
+    force_overwrite = st.checkbox("如果概念已存在，強制覆蓋")
+
     if st.button("確認儲存到 Notion + Pinecone", type="primary"):
         final_note = {
             "paper_title": note["paper_title"],
@@ -159,7 +186,12 @@ if "current_note" in st.session_state:
         with st.spinner("儲存中..."):
             page_id = get_or_create_paper_page(final_note["paper_title"])
             if concept_exists(page_id, final_note["concept"]):
-                st.warning(f"這個概念已經存在：{final_note['concept']}，跳過 Notion 儲存")
+                if force_overwrite:
+                    delete_concept_from_notion(page_id, final_note["concept"])
+                    create_toggle_block(page_id, final_note)
+                    st.success("✅ 已覆蓋到 Notion！")
+                else:
+                    st.warning(f"概念已存在，勾選「強制覆蓋」再儲存")
             else:
                 create_toggle_block(page_id, final_note)
                 st.success("✅ 已存到 Notion！")
